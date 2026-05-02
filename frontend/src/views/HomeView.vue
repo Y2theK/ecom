@@ -1,0 +1,506 @@
+<script setup lang="ts">
+import axios from 'axios'
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { useAuth } from '../services/auth'
+import { fetchProducts, getErrorMessage, placeOrder, type Product } from '../services/dashboard'
+
+const auth = useAuth()
+const user = auth.user
+const router = useRouter()
+
+const products = ref<Product[]>([])
+const selectedQuantities = ref<Record<number, number>>({})
+const loadingProducts = ref(false)
+const placingOrder = ref(false)
+const errorMessage = ref('')
+const successMessage = ref('')
+
+const selectedItems = computed(() =>
+  products.value
+    .map((product) => {
+      const quantity = selectedQuantities.value[product.id] ?? 0
+
+      return {
+        ...product,
+        quantity,
+      }
+    })
+    .filter((product) => product.quantity > 0),
+)
+
+const selectedCount = computed(() =>
+  selectedItems.value.reduce((total, product) => total + product.quantity, 0),
+)
+
+const selectedTotal = computed(() =>
+  selectedItems.value.reduce((total, product) => total + product.price * product.quantity, 0),
+)
+
+const canPlaceOrder = computed(() =>
+  !loadingProducts.value
+  && !placingOrder.value
+  && selectedItems.value.length > 0,
+)
+
+onMounted(async () => {
+  await loadProducts()
+})
+
+async function handleLogout() {
+  await auth.logout()
+  await router.push('/login')
+}
+
+async function loadProducts() {
+  loadingProducts.value = true
+  errorMessage.value = ''
+
+  try {
+    products.value = await fetchProducts()
+    selectedQuantities.value = {}
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      auth.setUser(null)
+      await router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
+      return
+    }
+
+    errorMessage.value = getErrorMessage(error, 'Unable to load products right now.')
+  } finally {
+    loadingProducts.value = false
+  }
+}
+
+function updateQuantity(productId: number, quantity: number) {
+  if (quantity <= 0) {
+    delete selectedQuantities.value[productId]
+    return
+  }
+
+  selectedQuantities.value[productId] = quantity
+}
+
+async function handlePlaceOrder() {
+  if (!canPlaceOrder.value) return
+
+  placingOrder.value = true
+  errorMessage.value = ''
+  successMessage.value = ''
+
+  try {
+    const response = await placeOrder(
+      selectedItems.value.map((product) => ({
+        product_id: product.id,
+        quantity: product.quantity,
+      })),
+    )
+
+    successMessage.value = response.message || 'Order created successfully.'
+    await loadProducts()
+  } catch (error) {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      auth.setUser(null)
+      await router.replace({ name: 'login', query: { redirect: router.currentRoute.value.fullPath } })
+      return
+    }
+
+    errorMessage.value = getErrorMessage(error, 'Unable to place the order right now.')
+  } finally {
+    placingOrder.value = false
+  }
+}
+
+function formatCurrency(value: number) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 2,
+  }).format(value)
+}
+</script>
+
+<template>
+  <main class="dashboard-shell">
+    <section class="dashboard-panel">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Ecom Store</p>
+          <p class="subtitle">
+           Select products, review totals, and submit the order in one view.
+          </p>
+        </div>
+
+        <button type="button" class="logout-button" @click="handleLogout">Logout</button>
+      </header>
+
+      <p v-if="auth.isLoading.value || !auth.isInitialized.value" class="status-message">
+        Loading...
+      </p>
+
+      <template v-else>
+        <div v-if="errorMessage" class="notice error">{{ errorMessage }}</div>
+        <div v-if="successMessage" class="notice success">{{ successMessage }}</div>
+
+        <section class="content-grid">
+          <div class="catalog-card">
+            <div class="section-heading">
+              <div>
+                <p class="section-label">Products</p>
+                <h2>Available inventory</h2>
+              </div>
+
+              <button type="button" class="ghost-button" :disabled="loadingProducts" @click="loadProducts">
+                {{ loadingProducts ? 'Refreshing...' : 'Refresh' }}
+              </button>
+            </div>
+
+            <p v-if="loadingProducts" class="status-message">Loading products...</p>
+            <p v-else-if="products.length === 0" class="status-message">No products are available.</p>
+
+            <div v-else class="product-list">
+              <article v-for="product in products" :key="product.id" class="product-row">
+                <div class="product-copy">
+                  <h3>{{ product.name }}</h3>
+                  <p>{{ formatCurrency(product.price) }}</p>
+                  <span class="stock-badge" :class="{ low: product.stock <= 3 }">
+                    {{ product.stock }} in stock
+                  </span>
+                </div>
+
+                <label class="quantity-control">
+                  <span>Qty</span>
+                  <input
+                    :value="selectedQuantities[product.id] ?? 0"
+                    type="number"
+                    min="0"
+                    :max="product.stock"
+                    :disabled="product.stock === 0 || placingOrder"
+                    @input="updateQuantity(product.id, Number(($event.target as HTMLInputElement).value))"
+                  />
+                </label>
+              </article>
+            </div>
+          </div>
+
+          <aside class="summary-card">
+            <div class="section-heading compact">
+              <div>
+                <p class="section-label">Summary</p>
+                <h2>Current order</h2>
+              </div>
+            </div>
+
+            <p v-if="selectedItems.length === 0" class="status-message">
+              Select at least one product to prepare an order.
+            </p>
+
+            <div v-else class="summary-list">
+              <article v-for="item in selectedItems" :key="item.id" class="summary-item">
+                <div>
+                  <h3>{{ item.name }}</h3>
+                  <p>{{ item.quantity }} × {{ formatCurrency(item.price) }}</p>
+                </div>
+                <strong>{{ formatCurrency(item.price * item.quantity) }}</strong>
+              </article>
+            </div>
+
+            <dl class="totals">
+              <div>
+                <dt>Items</dt>
+                <dd>{{ selectedCount }}</dd>
+              </div>
+              <div>
+                <dt>Total</dt>
+                <dd>{{ formatCurrency(selectedTotal) }}</dd>
+              </div>
+            </dl>
+
+            <button type="button" class="primary-button" :disabled="!canPlaceOrder" @click="handlePlaceOrder">
+              {{ placingOrder ? 'Placing order...' : 'Place Order' }}
+            </button>
+          </aside>
+        </section>
+      </template>
+    </section>
+  </main>
+</template>
+
+<style scoped>
+.dashboard-shell {
+  min-height: 100vh;
+  padding: 32px 20px;
+  background:
+    radial-gradient(circle at top, rgba(99, 102, 241, 0.18), transparent 40%),
+    linear-gradient(180deg, #0f172a 0%, #111827 100%);
+}
+
+.dashboard-panel {
+  width: min(1180px, 100%);
+  margin: 0 auto;
+  padding: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 28px;
+  background: rgba(15, 23, 42, 0.78);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.45);
+  color: #f8fafc;
+}
+
+.hero,
+.section-heading,
+.product-row,
+.summary-item,
+.totals div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.eyebrow {
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #818cf8;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+}
+
+h1 {
+  font-size: 2rem;
+  line-height: 1.1;
+}
+
+.subtitle {
+  margin-top: 12px;
+  max-width: 640px;
+  color: rgba(226, 232, 240, 0.78);
+}
+
+.content-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(300px, 1fr);
+  gap: 24px;
+  margin-top: 28px;
+}
+
+.catalog-card,
+.summary-card {
+  padding: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 24px;
+  background: rgba(15, 23, 42, 0.72);
+}
+
+.section-heading {
+  margin-bottom: 18px;
+}
+
+.section-heading.compact {
+  margin-bottom: 12px;
+}
+
+.section-label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #818cf8;
+}
+
+.product-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.summary-list {
+  display: grid;
+  gap: 14px;
+}
+
+.product-row {
+  display: grid;
+  align-content: space-between;
+  gap: 18px;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(30, 41, 59, 0.88);
+}
+
+.summary-item {
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(30, 41, 59, 0.88);
+}
+
+.product-copy {
+  display: grid;
+  gap: 6px;
+}
+
+.product-copy p,
+.summary-item p,
+.status-message,
+.totals dt {
+  color: rgba(226, 232, 240, 0.72);
+}
+
+.stock-badge {
+  display: inline-flex;
+  width: fit-content;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, 0.14);
+  color: #86efac;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.stock-badge.low {
+  background: rgba(248, 113, 113, 0.14);
+  color: #fca5a5;
+}
+
+.quantity-control {
+  display: grid;
+  gap: 8px;
+  font-size: 0.9rem;
+  color: #e2e8f0;
+}
+
+.quantity-control input {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.9);
+  color: #f8fafc;
+}
+
+.quantity-control input:focus {
+  outline: none;
+  border-color: #818cf8;
+  box-shadow: 0 0 0 4px rgba(129, 140, 248, 0.18);
+}
+
+.totals {
+  display: grid;
+  gap: 12px;
+  margin: 22px 0;
+}
+
+.totals div {
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.totals dt,
+.totals dd {
+  margin: 0;
+}
+
+.totals dd {
+  font-weight: 700;
+  color: #f8fafc;
+}
+
+.notice {
+  margin-top: 20px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  font-size: 0.95rem;
+}
+
+.notice.error {
+  background: rgba(192, 38, 64, 0.1);
+  color: #9f1239;
+}
+
+.notice.success {
+  background: rgba(22, 163, 74, 0.1);
+  color: #166534;
+}
+
+.status-message {
+  font-size: 0.96rem;
+}
+
+button {
+  border: 0;
+  border-radius: 16px;
+  padding: 13px 18px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.2s ease, opacity 0.2s ease, background 0.2s ease;
+}
+
+button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.logout-button {
+  background: rgba(255, 255, 255, 0.08);
+  color: #f8fafc;
+}
+
+.ghost-button {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+}
+
+.primary-button {
+  width: 100%;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  color: white;
+}
+
+button:disabled {
+  opacity: 0.58;
+  cursor: not-allowed;
+  transform: none;
+}
+
+@media (max-width: 900px) {
+  .dashboard-shell {
+    padding: 20px 14px;
+  }
+
+  .dashboard-panel {
+    padding: 20px;
+  }
+
+  .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .hero,
+  .section-heading,
+  .summary-item,
+  .totals div {
+    align-items: flex-start;
+  }
+
+  .hero,
+  .section-heading {
+    flex-direction: column;
+  }
+
+  .product-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .product-list {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
