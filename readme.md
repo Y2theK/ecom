@@ -23,6 +23,8 @@ orders.
 `Laravel 12` `sqlite` `vue 3`  `tailwindcss`  `axios` 
 
 ### Screenshots
+<img src="https://github.com/Y2theK/ecom/blob/master/frontend/src/assets/image/home.png" width=50% height=50% alt= "Home">
+<img src="https://github.com/Y2theK/ecom/blob/master/frontend/src/assets/image/login.png" width=50% height=50% alt= "Login">
 
 ### Installation
 
